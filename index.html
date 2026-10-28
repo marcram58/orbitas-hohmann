@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>orbitas_hohmann - pygodide</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/hack-font@3/build/web/hack.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Hack", ui-monospace, "Cascadia Code", "SF Mono", Menlo,
+          Consolas, monospace;
+        --pygodide-accent: #3dd018;
+        --pygodide-accent-2: #e8c200;
+        --pygodide-accent-3: #306998;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      /*
+        Layout is always flush: page/shell match the play surface. Loading
+        chrome is an overlay on the stage (its own padding), not shell margin.
+      */
+      html,
+      body {
+        margin: 0;
+        color: #edf3ff;
+        background: #050814;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+      .pygodide-shell {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      /* Stage is the canvas box; loader sits on top with absolute inset. */
+      .pygodide-stage {
+        position: relative;
+        margin: 0;
+        padding: 0;
+      }
+
+      /*
+        While the loader is up, ring the stage so the loading surface does not
+        blend into the same-colored window background. box-shadow keeps layout
+        size unchanged; gone when the loader is hidden for gameplay.
+      */
+      .pygodide-stage:has(#pygodide-loader:not([data-state="hidden"])) {
+        box-shadow:
+          0 0 0 1px #000000,
+          0 0 0 2px rgba(0, 0, 0, 0.65);
+      }
+
+      
+      /*
+        Fixed: play surface is canvas W×H. Body fills the host window so a
+        larger browser centers the game (top-middle); tight embeds (iframe =
+        game size) get no extra gap.
+      */
+      html,
+      body {
+        width: 100%;
+        min-height: 100%;
+        height: 100%;
+      }
+
+      body {
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        /* Only pad when the window is taller than the game (0 in a tight iframe). */
+        padding-top: max(0px, min(24px, 100vh - 750px));
+        padding-top: max(0px, min(24px, 100dvh - 750px));
+        box-sizing: border-box;
+      }
+
+      .pygodide-shell,
+      .pygodide-stage {
+        width: 1100px;
+        height: 750px;
+        flex-shrink: 0;
+      }
+      
+
+      /* Loading / error chrome: padded panel over the canvas, not page chrome. */
+      #pygodide-loader {
+        position: absolute;
+        inset: 0;
+        z-index: 3;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 8% 10% 12%;
+        box-sizing: border-box;
+        pointer-events: none;
+        transition:
+          opacity 180ms ease-out,
+          visibility 180ms linear;
+      }
+
+      #pygodide-loader[data-state="hidden"] {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+
+      /*
+        Errors / sync-loop help: the loader is pointer-events: none while
+        loading so the canvas stays clickable. On error, lift that so the
+        status scrollport receives wheel, trackpad, and scrollbar input
+        (otherwise hits fall through to the canvas under the overlay).
+      */
+      #pygodide-loader[data-state="error"] {
+        pointer-events: auto;
+        /* Let the error column keep natural height and scroll inside the stage
+           instead of flex-shrinking the status below its max-height. */
+        justify-content: safe center;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+
+      #pygodide-brand {
+        display: block;
+        width: min(420px, 88%);
+        margin: 0 auto 1.35rem;
+        /* Nudge logo up so status + bar sit under the visual center. */
+        transform: translateY(-10%);
+        /* Loader is pointer-events: none; re-enable so the logo link works. */
+        pointer-events: auto;
+        cursor: pointer;
+        text-decoration: none;
+        opacity: 0.98;
+        filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.45));
+      }
+
+      #pygodide-brand img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      #status {
+        z-index: 4;
+        /* Fixed height keeps logo + progress bar from jumping when status
+           text swaps (e.g. hang pre-paint vs "Loading Python app..."). */
+        width: min(420px, 92%);
+        min-height: 2.9em;
+        max-height: 2.9em;
+        margin: 0 auto 0.85rem;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+        color: rgba(237, 243, 255, 0.88);
+        font-size: 14px;
+        font-weight: 400;
+        letter-spacing: 0.01em;
+        line-height: 1.45;
+        text-align: center;
+        white-space: normal;
+        overflow: hidden;
+        transition:
+          opacity 180ms ease-out,
+          color 180ms ease,
+          width 180ms ease-out;
+      }
+
+      /* Hang help is short but includes a docs URL; widen only this stage so
+         the fixed 2-line height can show the full line without clipping. */
+      #status[data-wide="true"] {
+        width: min(800px, 96%);
+      }
+
+      #status[data-state="hidden"],
+      #status:empty {
+        opacity: 0;
+      }
+
+      /* Single error-panel rule: interactive scrollport + readable chrome. */
+      #status[data-state="error"] {
+        /* Do not flex-shrink below max-height; loader scrolls if the column is tall. */
+        flex: 0 0 auto;
+        max-height: min(45vh, 22rem);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        pointer-events: auto;
+        user-select: text;
+        -webkit-user-select: text;
+        touch-action: pan-y;
+        color: #ffb4b4;
+        text-align: left;
+        white-space: pre-wrap;
+        padding: 12px 14px;
+        border: 1px solid rgba(255, 132, 132, 0.35);
+        border-radius: 10px;
+        background: rgba(42, 12, 16, 0.92);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+        /* Prefer a grabable scrollbar over overlay-only affordances. */
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 180, 180, 0.75) rgba(0, 0, 0, 0.35);
+      }
+
+      #status[data-state="error"]::-webkit-scrollbar {
+        width: 12px;
+      }
+
+      #status[data-state="error"]::-webkit-scrollbar-track {
+        margin: 4px 0;
+        background: rgba(0, 0, 0, 0.35);
+        border-radius: 8px;
+      }
+
+      #status[data-state="error"]::-webkit-scrollbar-thumb {
+        background: rgba(255, 160, 160, 0.8);
+        border-radius: 8px;
+        border: 2px solid rgba(42, 12, 16, 0.92);
+      }
+
+      /*
+        Snake progress: single-row playfield.
+        --cell = pitch, --seg = solid block, --line = grid gap.
+        boot.js snaps fill to N * --cell and sets --head-left / --apple-inset.
+      */
+      .pygodide-progress {
+        --cell: 12px;
+        --line: 2px;
+        --seg: 10px;
+        --pad-y: 5px;
+        --pad-x: 8px;
+        --snake-gold: #ffe94a;
+        --snake-gold-deep: #e8c200;
+        --snake-gold-shine: #fff6a8;
+        --apple-green: #6af02a;
+        --apple-green-deep: #2db010;
+        --head-left: 0px;
+        --apple-inset: 0px;
+        position: relative;
+        display: flex;
+        align-items: center;
+        width: min(360px, 82%);
+        height: calc(var(--pad-y) * 2 + var(--seg));
+        margin: 0.25rem auto 0;
+        padding: var(--pad-y) var(--pad-x);
+        border-radius: 8px;
+        overflow: hidden;
+        box-sizing: border-box;
+        background-color: #122a48;
+        background-image:
+          /* Soft vignette */
+          radial-gradient(
+            ellipse 90% 140% at 50% 50%,
+            rgba(40, 90, 140, 0.35) 0%,
+            transparent 70%
+          ),
+          /* Vertical cell separators only */
+          repeating-linear-gradient(
+            90deg,
+            transparent 0,
+            transparent var(--seg),
+            rgba(20, 50, 85, 0.95) var(--seg),
+            rgba(20, 50, 85, 0.95) var(--cell)
+          );
+        background-origin: content-box, content-box;
+        background-size: 100% 100%, var(--cell) 100%;
+        background-position: 0 0, 0 0;
+        background-repeat: no-repeat, repeat-x;
+        box-shadow:
+          inset 0 1px 0 rgba(140, 190, 255, 0.12),
+          inset 0 0 0 1px rgba(90, 140, 190, 0.28),
+          inset 0 -6px 12px rgba(0, 0, 0, 0.28),
+          0 6px 18px rgba(0, 0, 0, 0.35);
+      }
+
+      .pygodide-progress[data-state="hidden"] {
+        opacity: 0;
+      }
+
+      .pygodide-progress[data-state="error"] {
+        --snake-gold: #ff9a9a;
+        --snake-gold-deep: #e05555;
+        --snake-gold-shine: #ffc8c8;
+        background-color: #3a141c;
+        background-image:
+          radial-gradient(
+            ellipse 90% 140% at 50% 50%,
+            rgba(120, 40, 55, 0.35) 0%,
+            transparent 70%
+          ),
+          repeating-linear-gradient(
+            90deg,
+            transparent 0,
+            transparent var(--seg),
+            rgba(80, 25, 35, 0.95) var(--seg),
+            rgba(80, 25, 35, 0.95) var(--cell)
+          );
+      }
+
+      .pygodide-progress-fill {
+        position: relative;
+        display: block;
+        width: var(--cell);
+        min-width: var(--cell);
+        height: var(--seg);
+        flex: 0 0 auto;
+        align-self: center;
+        box-sizing: border-box;
+        /* Layered body: deep gold base + shine strip + soft outer glow */
+        background-image:
+          repeating-linear-gradient(
+            90deg,
+            var(--snake-gold-deep) 0,
+            var(--snake-gold-deep) var(--seg),
+            transparent var(--seg),
+            transparent var(--cell)
+          ),
+          repeating-linear-gradient(
+            90deg,
+            var(--snake-gold) 0,
+            var(--snake-gold-shine) 35%,
+            var(--snake-gold) 70%,
+            var(--snake-gold-deep) var(--seg),
+            transparent var(--seg),
+            transparent var(--cell)
+          );
+        background-size: var(--cell) 100%, var(--cell) 100%;
+        background-position: 0 0, 0 0;
+        background-repeat: repeat-x, repeat-x;
+        filter: drop-shadow(0 0 4px rgba(255, 220, 60, 0.45));
+      }
+
+      /* Yellow head: same size as body cells, slightly brighter + glow */
+      .pygodide-progress-fill::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: var(--head-left);
+        z-index: 1;
+        width: var(--seg);
+        height: var(--seg);
+        border-radius: 2px;
+        background:
+          linear-gradient(
+            165deg,
+            var(--snake-gold-shine) 0%,
+            var(--snake-gold) 42%,
+            var(--snake-gold-deep) 100%
+          );
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 200, 0.25),
+          0 0 8px rgba(255, 220, 50, 0.55),
+          0 1px 2px rgba(0, 0, 0, 0.25);
+      }
+
+      /*
+        Equal eyes via two radial gradients (not element + box-shadow,
+        which rendered different sizes).
+      */
+      .pygodide-progress-fill::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: var(--head-left);
+        z-index: 2;
+        width: var(--seg);
+        height: var(--seg);
+        pointer-events: none;
+        background:
+          radial-gradient(
+            circle 1.25px at calc(50% - 2px) 42%,
+            #1a1a1a 95%,
+            transparent 100%
+          ),
+          radial-gradient(
+            circle 1.25px at calc(50% + 2px) 42%,
+            #1a1a1a 95%,
+            transparent 100%
+          );
+      }
+
+      /* Apple with gloss + glow */
+      .pygodide-progress::after {
+        content: "";
+        position: absolute;
+        top: var(--pad-y);
+        left: calc(var(--pad-x) + var(--apple-inset));
+        width: var(--seg);
+        height: var(--seg);
+        border-radius: 2px;
+        background:
+          radial-gradient(
+            circle at 30% 28%,
+            rgba(255, 255, 255, 0.55) 0%,
+            transparent 42%
+          ),
+          linear-gradient(160deg, var(--apple-green), var(--apple-green-deep));
+        box-shadow:
+          0 0 0 1px rgba(180, 255, 140, 0.25),
+          0 0 10px rgba(80, 220, 40, 0.55),
+          0 1px 2px rgba(0, 0, 0, 0.3);
+        pointer-events: none;
+      }
+
+      .pygodide-progress[data-state="error"] .pygodide-progress-fill {
+        filter: drop-shadow(0 0 4px rgba(255, 100, 100, 0.45));
+      }
+
+      .pygodide-progress[data-state="error"]::after {
+        opacity: 0.4;
+        filter: grayscale(0.2);
+      }
+
+      #pygodide-version {
+        position: absolute;
+        right: 12px;
+        bottom: 12px;
+        z-index: 4;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: rgba(237, 243, 255, 0.42);
+        font-size: 11px;
+        font-weight: 400;
+        letter-spacing: 0.02em;
+        line-height: 1;
+        pointer-events: none;
+        user-select: none;
+        transition:
+          opacity 150ms ease-out,
+          visibility 150ms linear;
+      }
+
+      #pygodide-version[data-state="hidden"] {
+        opacity: 0;
+        visibility: hidden;
+      }
+
+      #canvas {
+        display: block;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: #050814;
+        
+        width: 1100px;
+        height: 750px;
+        
+      }
+    </style>
+  </head>
+  <body>
+    <main class="pygodide-shell">
+      <div class="pygodide-stage">
+        <div id="pygodide-loader" data-state="active" aria-live="polite">
+          <a
+            id="pygodide-brand"
+            href="https://github.com/Elan456/pygodide"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="pygodide on GitHub"
+          >
+            <img
+              src="./pygodide-logo.svg"
+              width="420"
+              height="131"
+              alt="pygodide"
+            />
+          </a>
+          <div id="status" data-state="active">Loading...</div>
+          <div
+            id="pygodide-progress"
+            class="pygodide-progress"
+            data-state="active"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="8"
+            aria-label="Loading progress"
+          >
+            <span id="pygodide-progress-fill" class="pygodide-progress-fill"></span>
+          </div>
+        </div>
+        <p id="pygodide-version" data-state="active">pygodide 0.1.0</p>
+        <canvas
+          id="canvas"
+          data-canvas-layout="fixed"
+          width="1100"
+          height="750"
+          tabindex="0"
+        ></canvas>
+      </div>
+    </main>
+    <script src="https://cdn.jsdelivr.net/pyodide/v314.0.0/full/pyodide.js"></script>
+    
+    <script type="module" src="./boot.js?v=a072dcb18160"></script>
+  </body>
+</html>
