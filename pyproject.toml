@@ -1,0 +1,11 @@
+[project]
+name = "orbitas-hohmann"
+version = "1.0.0"
+dependencies = [
+    "pygame-ce"
+]
+
+[tool.pygodide]
+app = "orbitas:main"
+canvas_width = 1100
+canvas_height = 750
